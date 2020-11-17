@@ -5,7 +5,7 @@ import click
 from dtoolbioimage import Image as dbiImage
 from dtoolbioimage.segment import Segmentation
 
-from mrepo import ManagedRepo
+from mrepo import ManagedRepo, filter_specs
 
 
 def delta_join_by_matching(proj_from, proj_to, mode='right'):
@@ -135,8 +135,9 @@ def segjoin(mr, id_from, id_to):
 
 def projections_and_offsets_to_merged_projection(projs_offsets, tdim=1024):
     nrows = 2
-    ncols = 3
+    ncols = 2
     canvas = np.zeros((nrows*tdim, ncols*tdim), dtype=np.uint16)
+    canvas = np.zeros((1024+7, 1024+851), dtype=np.uint16)
 
     for proj, (dr, dc) in projs_offsets:
         canvas[dr:dr+tdim, dc:dc+tdim] = proj
@@ -197,9 +198,9 @@ def segmentations_and_offsets_to_merged_segmentation(segs_offsets, tdim=1024):
 
 @click.command()
 @click.argument('base_dirpath')
-def main(base_dirpath):
+def oldmain(base_dirpath):
 
-    tp = 304
+    tp = 256
 
     mr = ManagedRepo(base_dirpath)
 
@@ -241,7 +242,7 @@ def main(base_dirpath):
         [0, 9, 4]
     ]
 
-    ordering = ordering_304
+    ordering = ordering_256
     row = ordering[0]
 
     tdr, tdc = 0, 0
@@ -289,6 +290,57 @@ def main(base_dirpath):
     merged_segmentation.save("smerge.png")
 
 
+def load_projections(mr, selected_specs):
+    projection_spec = {
+        "type_name": "projection",
+        "ext": "png"
+    }
+    projections = {
+        item.series_index: dbiImage.from_file(
+            mr.item_abspath(item, projection_spec)
+        )
+        for item in selected_specs
+    }
+
+    return projections
+
+
+@click.command()
+@click.argument('base_dirpath')
+@click.argument('tp', type=float)
+def main(base_dirpath, tp):
+
+    mr = ManagedRepo(base_dirpath)
+    all_specs = mr.item_specs_by_dataspec()['projection']
+
+    position = "BR"
+    genotype = "WT"
+
+    selected_specs = filter_specs(all_specs, tp=tp, genotype=genotype, position=position)
+    projections = load_projections(mr, selected_specs)
+    
+    ordering = [[0, 1]]
+
+    row = ordering[0]
+
+    tdr, tdc = 0, 0
+    offsets = {
+        row[0]: (0, 0)
+    }
+    for i in range(len(row)-1):
+        id_from = row[i]
+        id_to = row[i+1]
+        print(f"Join {id_from} to {id_to}")
+        dr, dc = delta_join_by_matching(
+            projections[id_from], projections[id_to])
+        tdr += int(dr)
+        tdc += int(dc)
+        print(id_to, tdr, tdc)
+        offsets[id_to] = tdr, tdc
+
+    adjusted_offsets = adjust_offsets(offsets)
+    print(adjusted_offsets)
+    merge_and_save_projections(projections, adjusted_offsets, "pmerge.png")
 
 if __name__ == "__main__":
     main()
