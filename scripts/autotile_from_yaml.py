@@ -5,6 +5,7 @@ import numpy as np
 from skimage.feature import match_template
 
 import click
+import parse
 from dtoolbioimage import Image as dbiImage
 from dtoolbioimage.segment import Segmentation
 
@@ -66,8 +67,6 @@ def delta_join_by_matching(proj_from, proj_to, mode='right'):
     return np.median(np.array(all_deltas)[indices], axis=0)
 
 
-
-
 def delta_from_segs_and_joins(seg_from, seg_to, joins):
     deltas = np.array([
         np.array(seg_from.rprops[lfrom].centroid) -
@@ -78,74 +77,6 @@ def delta_from_segs_and_joins(seg_from, seg_to, joins):
     print(deltas)
 
     return np.median(deltas, axis=0)
-
-
-def segjoin(mr, id_from, id_to):
-
-    all_specs = mr.item_specs_by_dataspec()['segmentation']
-    selected_specs = [item for item in all_specs if item.tp == 256]
-
-    segmentation_spec = {
-        "type_name": "segmentation",
-        "ext": "png"
-    }
-    segmentations = {
-        item.series_index: Segmentation.from_file(
-            mr.item_abspath(item, segmentation_spec))
-        for item in selected_specs
-    }
-
-    left = np.array(segmentations[id_from].label_id_image)[:, 768:, :]
-    right = np.array(segmentations[id_to].label_id_image)[:, :256, :]
-    np.hstack([left, right]).view(dbiImage).save(
-        f"joinimage-{id_from}-{id_to}.png")
-
-    joins_4_1 = {
-        72: 17,
-        941: 381,
-        288: 385,
-        501: 182,
-        585: 223,
-        746: 308,
-        840: 357
-    }
-
-    joins_8_6 = {
-        27: 585,
-        281: 593,
-        47: 78,
-        89: 173,
-        136: 269,
-        182: 390,
-        212: 505
-    }
-
-    joins_6_0 = {
-        354: 64,
-        245: 44,
-        93: 17,
-        60: 11
-    }
-
-    joins = {
-        (4, 1): joins_4_1,
-        (8, 6): joins_8_6,
-        (6, 0): joins_6_0
-    }
-
-    joins_3_4 = {
-        7: 73,
-        12: 101,
-        2: 45,
-        17: 154
-    }
-
-
-    print(delta_from_segs_and_joins(
-        segmentations[id_from],
-        segmentations[id_to],
-        joins[(id_from, id_to)])
-    )
 
 
 def projections_and_offsets_to_merged_projection(projs_offsets, tdim=1024):
@@ -261,6 +192,9 @@ def load_segmentations(mr, selected_specs):
 
 
 def determine_offsets_from_projections(projections, ordering):
+
+    print(f"Ordering: {ordering}")
+
     row = ordering[0]
 
     tdr, tdc = 0, 0
@@ -280,7 +214,10 @@ def determine_offsets_from_projections(projections, ordering):
         # print(id_to, tdr, tdc)
         offsets[id_to] = tdr, tdc
 
-    if len(ordering) == 2:
+    if len(ordering) >= 2:
+
+        logger.info(f"At least 2 rows in ordering")
+
         row = ordering[1]
 
         dr, dc = delta_join_by_matching(
@@ -301,33 +238,33 @@ def determine_offsets_from_projections(projections, ordering):
             tdc += int(dc)
             offsets[id_to] = tdr, tdc
 
+    if len(ordering) == 3:
+
+        logger.info(f"At least 3 rows in ordering")
+
+        tdr0, tdc0 = offsets[row[0]]
+
+        row = ordering[2]
+
+        dr, dc = delta_join_by_matching(
+            projections[ordering[1][0]],
+            projections[ordering[2][0]],
+            'down'
+        )
+        tdr = int(dr) + tdr0
+        tdc = int(dc) + tdc0
+        offsets[row[0]] = (tdr, tdc)
+        for i in range(len(row)-1):
+            id_from = row[i]
+            id_to = row[i+1]
+            logging.info(f"Join {id_from} to {id_to}")
+            dr, dc = delta_join_by_matching(
+                projections[id_from], projections[id_to])
+            tdr += int(dr)
+            tdc += int(dc)
+            offsets[id_to] = tdr, tdc
+
     return offsets
-
-
-@click.command()
-@click.argument('base_dirpath')
-@click.argument('tp', type=float)
-def omain(base_dirpath, tp):
-
-    mr = ManagedRepo(base_dirpath)
-    all_specs = mr.item_specs_by_dataspec()['projection']
-
-    position = "BR"
-    genotype = "WT"
-
-    # ordering = [[0, 1]]
-    ordering = [[2, 1], [0, 3]]
-
-    selected_specs = filter_specs(all_specs, tp=tp, genotype=genotype, position=position)
-    projections = load_projections(mr, selected_specs)
-    segmentations = load_segmentations(mr, selected_specs)
-
-    offsets = determine_offsets_from_projections(projections, ordering)
-
-    adjusted_offsets = adjust_offsets(offsets)
-
-    merge_and_save_projections(projections, adjusted_offsets, "pmerge.png")
-    merge_and_save_segmentations(segmentations, adjusted_offsets, "smerge.png")
 
 
 def create_guide_image(config):
@@ -352,6 +289,21 @@ def create_guide_image(config):
     np.vstack(rowjoins).view(dbiImage).save('test.png')
 
 
+def get_projection_fname(mr, selected_specs):
+
+    format_str = mr.fname_format
+    spec = list(selected_specs)[0]
+    metadata = vars(spec)
+    metadata.update({
+        "ext": "png",
+        "series_index": 0,
+        "type_name": "finalprojection"
+    })
+    projection_fname = format_str.format(**metadata)
+
+    return projection_fname
+
+
 def create_merges(config):
 
     mr = ManagedRepo(config.mrepo_dirpath)
@@ -364,6 +316,8 @@ def create_merges(config):
         position=config.position
     )
 
+    selected_specs = list(selected_specs)
+
     projections = load_projections(mr, selected_specs)
     segmentations = load_segmentations(mr, selected_specs)
 
@@ -371,14 +325,32 @@ def create_merges(config):
 
     adjusted_offsets = adjust_offsets(offsets)
 
-    merge_and_save_projections(projections, adjusted_offsets, "pmerge.png")
-    merge_and_save_segmentations(segmentations, adjusted_offsets, "smerge.png")
+    print(adjusted_offsets)
+
+    spec = list(selected_specs)[0]
+    spec.series_index = 0
+    fprojection_spec = {
+        "type_name": "finalprojection",
+        "ext": "png"
+    }
+    fsegmentation_spec = {
+        "type_name": "finalsegmentation",
+        "ext": "png"
+    }
+    projection_fname = mr.fname_for_spec(fprojection_spec, spec)
+    segmentation_fname = mr.fname_for_spec(fsegmentation_spec, spec)
+
+    merge_and_save_projections(projections, adjusted_offsets, projection_fname)
+    merge_and_save_segmentations(segmentations, adjusted_offsets, segmentation_fname)
 
 
 @click.command()
 @click.argument('config_fpath')
 @click.option('--guide/--no-guide', default=False)
 def main(config_fpath, guide):
+
+    logging.basicConfig(level=logging.INFO)
+
 
     config = Config.from_fpath(config_fpath)
 

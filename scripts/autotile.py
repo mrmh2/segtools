@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from skimage.feature import match_template
 
@@ -6,6 +8,9 @@ from dtoolbioimage import Image as dbiImage
 from dtoolbioimage.segment import Segmentation
 
 from mrepo import ManagedRepo, filter_specs
+
+
+logger = logging.getLogger(__file__)
 
 
 def delta_join_by_matching(proj_from, proj_to, mode='right'):
@@ -134,12 +139,15 @@ def segjoin(mr, id_from, id_to):
 
 
 def projections_and_offsets_to_merged_projection(projs_offsets, tdim=1024):
-    nrows = 2
-    ncols = 2
-    canvas = np.zeros((nrows*tdim, ncols*tdim), dtype=np.uint16)
-    canvas = np.zeros((1024+7, 1024+851), dtype=np.uint16)
+
+    max_dr = max([dr for _, (dr, _) in projs_offsets])
+    max_dc = max([dc for _, (_, dc) in projs_offsets])
+    canvas = np.zeros((1024+max_dr, 1024+max_dc), dtype=np.uint16)
+
+    print(max_dr, max_dc)
 
     for proj, (dr, dc) in projs_offsets:
+        print(dr, dc)
         canvas[dr:dr+tdim, dc:dc+tdim] = proj
 
     return canvas
@@ -155,6 +163,17 @@ def merge_and_save_projections(projections, offsets, output_fpath):
         projs_offsets).view(dbiImage)
 
     merged_projection.save(output_fpath)
+
+
+def merge_and_save_segmentations(segmentations, offsets, output_fpath):
+    segs_offsets = [
+        (segmentations[idx], offset)
+        for idx, offset in offsets.items()
+    ]
+
+    merged_segmentation = segmentations_and_offsets_to_merged_segmentation(segs_offsets)
+
+    merged_segmentation.save(output_fpath)
 
 
 def adjust_offsets(offsets):
@@ -185,9 +204,15 @@ def append_segmentation(canvas, segadd, delta, label_iter):
 
 
 def segmentations_and_offsets_to_merged_segmentation(segs_offsets, tdim=1024):
-    nrows = 2
-    ncols = 3
-    canvas = np.zeros((nrows*tdim, ncols*tdim), dtype=np.uint16)
+    # nrows = 2
+    # ncols = 3
+    # canvas = np.zeros((nrows*tdim, ncols*tdim), dtype=np.uint16)
+
+    max_dr = max([dr for _, (dr, _) in segs_offsets])
+    max_dc = max([dc for _, (_, dc) in segs_offsets])
+    canvas = np.zeros((1024+max_dr, 1024+max_dc), dtype=np.uint16)
+
+    # print(max_dr, max_dc)
     label_iter = iter(range(1, 10000))
 
     for seg, (dr, dc) in segs_offsets:
@@ -259,6 +284,7 @@ def oldmain(base_dirpath):
         print(id_to, tdr, tdc)
         offsets[id_to] = tdr, tdc
 
+
     row = ordering[1]
 
     dr, dc = delta_join_by_matching(
@@ -305,6 +331,64 @@ def load_projections(mr, selected_specs):
     return projections
 
 
+def load_segmentations(mr, selected_specs):
+    segmentation_spec = {
+        "type_name": "segmentation",
+        "ext": "png"
+    }
+    segmentations = {
+        item.series_index: Segmentation.from_file(
+            mr.item_abspath(item, segmentation_spec))
+        for item in selected_specs
+    }
+
+    return segmentations
+
+
+def determine_offsets_from_projections(projections, ordering):
+    row = ordering[0]
+
+    tdr, tdc = 0, 0
+    offsets = {
+        row[0]: (0, 0)
+    }
+
+    for i in range(len(row)-1):
+        id_from = row[i]
+        id_to = row[i+1]
+        logging.info(f"Join {id_from} to {id_to}")
+        dr, dc = delta_join_by_matching(
+            projections[id_from], projections[id_to]
+        )
+        tdr += int(dr)
+        tdc += int(dc)
+        # print(id_to, tdr, tdc)
+        offsets[id_to] = tdr, tdc
+
+    if len(ordering) == 2:
+        row = ordering[1]
+
+        dr, dc = delta_join_by_matching(
+            projections[ordering[0][0]],
+            projections[ordering[1][0]],
+            'down'
+        )
+        tdr = int(dr)
+        tdc = int(dc)
+        offsets[row[0]] = (tdr, tdc)
+        for i in range(len(row)-1):
+            id_from = row[i]
+            id_to = row[i+1]
+            logging.info(f"Join {id_from} to {id_to}")
+            dr, dc = delta_join_by_matching(
+                projections[id_from], projections[id_to])
+            tdr += int(dr)
+            tdc += int(dc)
+            offsets[id_to] = tdr, tdc
+
+    return offsets
+
+
 @click.command()
 @click.argument('base_dirpath')
 @click.argument('tp', type=float)
@@ -316,31 +400,19 @@ def main(base_dirpath, tp):
     position = "BR"
     genotype = "WT"
 
+    # ordering = [[0, 1]]
+    ordering = [[2, 1], [0, 3]]
+
     selected_specs = filter_specs(all_specs, tp=tp, genotype=genotype, position=position)
     projections = load_projections(mr, selected_specs)
-    
-    ordering = [[0, 1]]
+    segmentations = load_segmentations(mr, selected_specs)
 
-    row = ordering[0]
-
-    tdr, tdc = 0, 0
-    offsets = {
-        row[0]: (0, 0)
-    }
-    for i in range(len(row)-1):
-        id_from = row[i]
-        id_to = row[i+1]
-        print(f"Join {id_from} to {id_to}")
-        dr, dc = delta_join_by_matching(
-            projections[id_from], projections[id_to])
-        tdr += int(dr)
-        tdc += int(dc)
-        print(id_to, tdr, tdc)
-        offsets[id_to] = tdr, tdc
+    offsets = determine_offsets_from_projections(projections, ordering)
 
     adjusted_offsets = adjust_offsets(offsets)
-    print(adjusted_offsets)
+
     merge_and_save_projections(projections, adjusted_offsets, "pmerge.png")
+    merge_and_save_segmentations(segmentations, adjusted_offsets, "smerge.png")
 
 if __name__ == "__main__":
     main()
